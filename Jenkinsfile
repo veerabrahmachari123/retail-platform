@@ -11,8 +11,8 @@ pipeline {
     environment {
         IMAGE_NAME = 'retail-platform'
         CONTAINER_NAME = "retail_app_${params.ENVIRONMENT.toLowerCase()}"
+        // Fixed Windows ports cleanly
         APP_PORT = "${params.ENVIRONMENT == 'PRODUCTION' ? '8000' : '8001'}"
-        HEALTH_CHECK_URL = "http://localhost:${env.APP_PORT}/health"
         OLD_VERSION = 'Unknown'
         NEW_VERSION = "${params.VERSION}"
         FINAL_STATE = 'NOT STARTED'
@@ -22,12 +22,10 @@ pipeline {
         stage('Guardrails & Validation') {
             steps {
                 script {
-                    // 1. Production Approval Gate
                     if (params.ENVIRONMENT == 'PRODUCTION' && params.DEPLOYMENT_ACTION == 'DEPLOY' && params.CONFIRM_PROD != 'YES') {
                         error "Deployment ABORTED: Production deployment requested but CONFIRM_PROD was not set to YES."
                     }
                     
-                    // 2. Identify selected Git Commit automatically using Windows batch
                     echo "Validating workspace code state..."
                     def commitHash = bat(script: "@git rev-parse HEAD", returnStdout: true).trim()
                     echo "Successfully validated target code commit hash: ${commitHash}"
@@ -38,7 +36,6 @@ pipeline {
         stage('Build Docker Image') {
             when { expression { params.DEPLOYMENT_ACTION == 'DEPLOY' } }
             steps {
-                // 3. Build image using unique tag (Using bat for Windows)
                 bat "docker build -t ${IMAGE_NAME}:${params.VERSION} ."
             }
         }
@@ -46,7 +43,6 @@ pipeline {
         stage('Record Audit State') {
             steps {
                 script {
-                    // 4. Record the previous image before editing
                     def inspectCmd = "@docker inspect --format=\"{{.Config.Image}}\" ${env.CONTAINER_NAME}"
                     try {
                         def output = bat(script: inspectCmd, returnStdout: true).trim()
@@ -67,24 +63,26 @@ pipeline {
                     env.FINAL_STATE = 'DEPLOYING_NEW_VERSION'
                     def tempContainer = "${env.CONTAINER_NAME}_new"
                     
-                    // 5. Start the new version before removing the old version (Zero Downtime)
                     bat "docker rm -f ${tempContainer} 2>nul || exit 0"
                     bat "docker run -d --name ${tempContainer} -p ${env.APP_PORT}:8000 ${IMAGE_NAME}:${params.VERSION}"
                     
-                    // 6. Perform application health check using Windows curl or PowerShell
                     def healthCheckPassed = false
+                    
+                    // Windows Native Health Loop (fixed variable substitution)
                     for (int i = 0; i < 6; i++) {
                         sleep 5
-                        // Note: Windows native curl uses double quotes
-                        def statusCode = bat(script: "@curl -s -o NUL -w \"%{http_code}\" ${env.HEALTH_CHECK_URL} || echo failed", returnStdout: true).trim()
+                        echo "Performing health probe attempt ${i+1}/6..."
+                        
+                        // Using explicit parameter mapping for Windows command line parsing
+                        def statusCode = bat(script: "@curl -s -o NUL -w \"%%{http_code}\" http://localhost:${env.APP_PORT}/health", returnStdout: true).trim()
+                        
                         if (statusCode == "200") {
                             healthCheckPassed = true
                             break
                         }
-                        echo "Health check attempt ${i+1}/6 failed (Status: ${statusCode}). Retrying..."
+                        echo "Health check status caught: (${statusCode}). Retrying..."
                     }
                     
-                    // 7. Automatic rollback execution if health check fails
                     if (!healthCheckPassed) {
                         env.FINAL_STATE = 'HEALTH_CHECK_FAILED_TRIGGERING_ROLLBACK'
                         bat "docker stop ${tempContainer} && docker rm ${tempContainer}"
@@ -117,7 +115,6 @@ pipeline {
     post {
         always {
             script {
-                // 9. Console clearly shows the state summary box
                 echo """
                 =======================================================
                 📋 PIPELINE EXECUTION SUMMARY
@@ -133,7 +130,6 @@ pipeline {
         }
         failure {
             script {
-                // 8. Exit status handles failures cleanly
                 if (env.FINAL_STATE == 'HEALTH_CHECK_FAILED_TRIGGERING_ROLLBACK') {
                     currentBuild.result = 'FAILURE'
                 }
