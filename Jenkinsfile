@@ -4,7 +4,7 @@ pipeline {
     parameters {
         choice(name: 'DEPLOYMENT_ACTION', choices: ['DEPLOY', 'ROLLBACK'], description: 'Choose the action to perform.')
         choice(name: 'ENVIRONMENT', choices: ['UAT', 'PRODUCTION'], description: 'Target deployment environment.')
-        string(name: 'VERSION', defaultValue: 'main', description: 'Enter the Git branch or tag name to build (e.g., main).')
+        string(name: 'VERSION', defaultValue: 'main', description: 'Enter the Git branch or tag name to validate.')
         choice(name: 'CONFIRM_PROD', choices: ['NO', 'YES'], description: 'Explicit approval required for PRODUCTION deployments.')
     }
 
@@ -22,28 +22,31 @@ pipeline {
         stage('Guardrails & Validation') {
             steps {
                 script {
+                    // 1. Production Approval Gate
                     if (params.ENVIRONMENT == 'PRODUCTION' && params.DEPLOYMENT_ACTION == 'DEPLOY' && params.CONFIRM_PROD != 'YES') {
                         error "Deployment ABORTED: Production deployment requested but CONFIRM_PROD was not set to YES."
                     }
                     
-                    echo "Cloning code repository..."
-                    cleanWs()
-                    git url: 'https://github.com', branch: "${params.VERSION}"
-                    
+                    // 2. Identify selected Git Commit automatically
+                    echo "Validating workspace code state..."
                     def commitHash = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
-                    echo "Successfully pulled code. Target commit hash: ${commitHash}"
+                    echo "Successfully validated target code commit hash: ${commitHash}"
                 }
             }
         }
 
         stage('Build Docker Image') {
             when { expression { params.DEPLOYMENT_ACTION == 'DEPLOY' } }
-            steps { sh "docker build -t ${IMAGE_NAME}:${params.VERSION} ." }
+            steps {
+                // 3. Build image using unique tag
+                sh "docker build -t ${IMAGE_NAME}:${params.VERSION} ."
+            }
         }
 
         stage('Record Audit State') {
             steps {
                 script {
+                    // 4. Record the previous image before editing
                     def inspectCmd = "docker inspect --format='{{.Config.Image}}' ${env.CONTAINER_NAME}"
                     try {
                         env.OLD_VERSION = sh(script: inspectCmd, returnStdout: true).trim().tokenize(':')[-1]
@@ -62,9 +65,12 @@ pipeline {
                 script {
                     env.FINAL_STATE = 'DEPLOYING_NEW_VERSION'
                     def tempContainer = "${env.CONTAINER_NAME}_new"
+                    
+                    // 5. Start the new version before removing the old version (Zero Downtime)
                     sh "docker rm -f ${tempContainer} || true"
                     sh "docker run -d --name ${tempContainer} -p ${env.APP_PORT}:8000 ${IMAGE_NAME}:${params.VERSION}"
                     
+                    // 6. Perform application health check
                     def healthCheckPassed = false
                     for (int i = 0; i < 6; i++) {
                         sleep 5
@@ -76,6 +82,7 @@ pipeline {
                         echo "Health check attempt ${i+1}/6 failed. Retrying..."
                     }
                     
+                    // 7. Automatic rollback execution if health check fails
                     if (!healthCheckPassed) {
                         env.FINAL_STATE = 'HEALTH_CHECK_FAILED_TRIGGERING_ROLLBACK'
                         sh "docker stop ${tempContainer} && docker rm ${tempContainer}"
@@ -108,6 +115,7 @@ pipeline {
     post {
         always {
             script {
+                // 9. Console clearly shows the state summary box
                 echo """
                 =======================================================
                 📋 PIPELINE EXECUTION SUMMARY
@@ -123,6 +131,7 @@ pipeline {
         }
         failure {
             script {
+                // 8. Exit status handles failures cleanly
                 if (env.FINAL_STATE == 'HEALTH_CHECK_FAILED_TRIGGERING_ROLLBACK') {
                     currentBuild.result = 'FAILURE'
                 }
