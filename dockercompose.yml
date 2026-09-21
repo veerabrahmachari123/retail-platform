@@ -1,0 +1,47 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: retail_app
+    restart: always
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=postgresql://retail_user:secure_password123@db:5432/retail_db
+      - ENV=production
+    depends_on:
+      db:
+        condition: service_healthy
+  test-runner:
+    build: .
+    container_name: retail_test_runner
+    environment:
+      - DATABASE_URL=postgresql://retail_user:secure_password123@db:5432/retail_db
+      - ENV=testing
+    command: ["python", "-m", "pytest", "-v"]
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:15-alpine
+    container_name: retail_postgres_db
+    restart: always
+    environment:
+      - POSTGRES_USER=retail_user
+      - POSTGRES_PASSWORD=secure_password123
+      - POSTGRES_DB=retail_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U retail_user -d retail_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+    driver: local
