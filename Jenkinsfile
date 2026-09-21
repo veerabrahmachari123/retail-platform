@@ -27,9 +27,9 @@ pipeline {
                         error "Deployment ABORTED: Production deployment requested but CONFIRM_PROD was not set to YES."
                     }
                     
-                    // 2. Identify selected Git Commit automatically
+                    // 2. Identify selected Git Commit automatically using Windows batch
                     echo "Validating workspace code state..."
-                    def commitHash = sh(script: "git rev-parse HEAD", returnStdout: true).trim()
+                    def commitHash = bat(script: "@git rev-parse HEAD", returnStdout: true).trim()
                     echo "Successfully validated target code commit hash: ${commitHash}"
                 }
             }
@@ -38,8 +38,8 @@ pipeline {
         stage('Build Docker Image') {
             when { expression { params.DEPLOYMENT_ACTION == 'DEPLOY' } }
             steps {
-                // 3. Build image using unique tag
-                sh "docker build -t ${IMAGE_NAME}:${params.VERSION} ."
+                // 3. Build image using unique tag (Using bat for Windows)
+                bat "docker build -t ${IMAGE_NAME}:${params.VERSION} ."
             }
         }
 
@@ -47,9 +47,10 @@ pipeline {
             steps {
                 script {
                     // 4. Record the previous image before editing
-                    def inspectCmd = "docker inspect --format='{{.Config.Image}}' ${env.CONTAINER_NAME}"
+                    def inspectCmd = "@docker inspect --format=\"{{.Config.Image}}\" ${env.CONTAINER_NAME}"
                     try {
-                        env.OLD_VERSION = sh(script: inspectCmd, returnStdout: true).trim().tokenize(':')[-1]
+                        def output = bat(script: inspectCmd, returnStdout: true).trim()
+                        env.OLD_VERSION = output.tokenize(':')[-1]
                         echo "Audited Architecture: Current active version running is ${env.OLD_VERSION}"
                     } catch (Exception e) {
                         echo "No previous active container instance found. Defaulting old version to none."
@@ -67,30 +68,31 @@ pipeline {
                     def tempContainer = "${env.CONTAINER_NAME}_new"
                     
                     // 5. Start the new version before removing the old version (Zero Downtime)
-                    sh "docker rm -f ${tempContainer} || true"
-                    sh "docker run -d --name ${tempContainer} -p ${env.APP_PORT}:8000 ${IMAGE_NAME}:${params.VERSION}"
+                    bat "docker rm -f ${tempContainer} 2>nul || exit 0"
+                    bat "docker run -d --name ${tempContainer} -p ${env.APP_PORT}:8000 ${IMAGE_NAME}:${params.VERSION}"
                     
-                    // 6. Perform application health check
+                    // 6. Perform application health check using Windows curl or PowerShell
                     def healthCheckPassed = false
                     for (int i = 0; i < 6; i++) {
                         sleep 5
-                        def statusCode = sh(script: "curl -s -o /dev/null -w '%{http_code}' ${env.HEALTH_CHECK_URL} || echo 'failed'", returnStdout: true).trim()
+                        // Note: Windows native curl uses double quotes
+                        def statusCode = bat(script: "@curl -s -o NUL -w \"%{http_code}\" ${env.HEALTH_CHECK_URL} || echo failed", returnStdout: true).trim()
                         if (statusCode == "200") {
                             healthCheckPassed = true
                             break
                         }
-                        echo "Health check attempt ${i+1}/6 failed. Retrying..."
+                        echo "Health check attempt ${i+1}/6 failed (Status: ${statusCode}). Retrying..."
                     }
                     
                     // 7. Automatic rollback execution if health check fails
                     if (!healthCheckPassed) {
                         env.FINAL_STATE = 'HEALTH_CHECK_FAILED_TRIGGERING_ROLLBACK'
-                        sh "docker stop ${tempContainer} && docker rm ${tempContainer}"
+                        bat "docker stop ${tempContainer} && docker rm ${tempContainer}"
                         error "Deployment failed health validation. Automated rollback requested."
                     } else {
-                        sh "docker stop ${env.CONTAINER_NAME} || true"
-                        sh "docker rm ${env.CONTAINER_NAME} || true"
-                        sh "docker rename ${tempContainer} ${env.CONTAINER_NAME}"
+                        bat "docker stop ${env.CONTAINER_NAME} 2>nul || exit 0"
+                        bat "docker rm ${env.CONTAINER_NAME} 2>nul || exit 0"
+                        bat "docker rename ${tempContainer} ${env.CONTAINER_NAME}"
                         env.FINAL_STATE = 'DEPLOYMENT_SUCCESSFUL'
                     }
                 }
@@ -103,9 +105,9 @@ pipeline {
                 script {
                     env.FINAL_STATE = 'MANUAL_ROLLBACK_EXECUTING'
                     if (env.OLD_VERSION == "None (Fresh Setup)") { error "Rollback aborted: No history found." }
-                    sh "docker stop ${env.CONTAINER_NAME} || true"
-                    sh "docker rm ${env.CONTAINER_NAME} || true"
-                    sh "docker run -d --name ${env.CONTAINER_NAME} -p ${env.APP_PORT}:8000 ${IMAGE_NAME}:${env.OLD_VERSION}"
+                    bat "docker stop ${env.CONTAINER_NAME} 2>nul || exit 0"
+                    bat "docker rm ${env.CONTAINER_NAME} 2>nul || exit 0"
+                    bat "docker run -d --name ${env.CONTAINER_NAME} -p ${env.APP_PORT}:8000 ${IMAGE_NAME}:${env.OLD_VERSION}"
                     env.FINAL_STATE = 'MANUAL_ROLLBACK_COMPLETE'
                 }
             }
